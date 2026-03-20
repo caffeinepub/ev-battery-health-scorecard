@@ -22,7 +22,19 @@ export interface TestResults {
     undervoltage: boolean;
     overcurrent: boolean;
     temperatureFault: boolean;
+    cellImbalance: boolean;
+    communicationFault: boolean;
+    contactorFault: boolean;
   };
+  // Cell Balance Test
+  cellBalanceVoltages: string[];
+  // Insulation Resistance Test
+  insulationResistancePosGnd: string;
+  insulationResistanceNegGnd: string;
+  // Charging Circuit Test
+  chargerOutputVoltage: string;
+  chargerOutputCurrent: string;
+  chargingPortVoltage: string;
 }
 
 function defaultTestResults(): TestResults {
@@ -40,7 +52,16 @@ function defaultTestResults(): TestResults {
       undervoltage: false,
       overcurrent: false,
       temperatureFault: false,
+      cellImbalance: false,
+      communicationFault: false,
+      contactorFault: false,
     },
+    cellBalanceVoltages: Array(16).fill(""),
+    insulationResistancePosGnd: "",
+    insulationResistanceNegGnd: "",
+    chargerOutputVoltage: "",
+    chargerOutputCurrent: "",
+    chargingPortVoltage: "",
   };
 }
 

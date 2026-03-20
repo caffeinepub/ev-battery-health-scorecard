@@ -26,15 +26,52 @@ function tempStatus(avg: number): Status {
   if (avg <= 60) return "warning";
   return "fault";
 }
+function spreadStatus(spread: number): Status {
+  if (spread < 0.1) return "good";
+  if (spread <= 0.2) return "warning";
+  return "fault";
+}
+function insulationStatus(pos: number, neg: number): Status {
+  if (pos < 0.5 || neg < 0.5) return "fault";
+  if (pos < 1 || neg < 1) return "warning";
+  return "good";
+}
+function chargingCircuitStatus(
+  chargerV: number,
+  portV: number,
+  chargerVRaw: string,
+): Status {
+  if (!chargerVRaw) return "good";
+  if (chargerV < 54 || chargerV > 58.8) return "warning";
+  if (portV > 0 && chargerV - portV > 3) return "fault";
+  return "good";
+}
 
 const FAULT_TEST_MAP: Record<string, string[]> = {
-  "Battery not charging": ["voltage", "voltageDrop", "bms"],
-  "Low range": ["voltage", "ir", "temperature"],
+  "Battery not charging": ["voltage", "voltageDrop", "bms", "chargingCircuit"],
+  "Low range": ["voltage", "ir", "temperature", "cellBalance"],
   "Vehicle not starting": ["voltage", "voltageDrop", "bms"],
   "Sudden power cut": ["voltage", "bms", "ir"],
   Overheating: ["temperature", "bms", "ir"],
   "No acceleration": ["voltage", "bms"],
   "Error code issue": ["bms", "voltage"],
+  "Cell Imbalance": ["voltage", "cellBalance", "ir"],
+  "Charging Stops Midway": ["voltage", "bms", "chargingCircuit"],
+  "Battery Swelling": ["temperature", "ir", "insulation"],
+  "Idle Drain / Parasitic Loss": ["voltage", "insulation", "bms"],
+  "BMS Communication Failure": ["bms", "voltage"],
+  "Contactor / Relay Failure": ["voltage", "voltageDrop", "bms"],
+  // New battery faults
+  "Voltage Sag Under Load": ["voltage", "voltageDrop", "ir"],
+  "Cell Reversal Detected": ["voltage", "cellBalance", "bms"],
+  "Pack Imbalance After Full Charge": ["cellBalance", "voltage", "ir"],
+  "Charger Not Recognized by BMS": ["bms", "chargingCircuit"],
+  "Regenerative Braking Fault": ["voltage", "bms"],
+  "Battery Disconnects Under Acceleration": ["voltage", "voltageDrop", "ir"],
+  "High Self-Discharge Rate": ["voltage", "insulation", "bms"],
+  "Sulfation / Deep Discharge Damage": ["voltage", "ir", "cellBalance"],
+  "Cell Short Circuit": ["voltage", "ir", "insulation", "temperature"],
+  "Battery Capacity Below 60%": ["voltage", "ir", "cellBalance"],
 };
 
 function getTests(fault: string): string[] {
@@ -62,6 +99,38 @@ const FAULT_CAUSES: Record<string, string> = {
     "Throttle signal issue, controller fault, or low battery voltage",
   "Error code issue":
     "BMS fault stored in memory, sensor failure, or firmware issue",
+  "Cell Imbalance":
+    "One or more cells significantly off average voltage — possible cell degradation or BMS balancing failure",
+  "Charging Stops Midway":
+    "BMS overtemperature, overvoltage cutoff, or charger communication fault",
+  "Battery Swelling":
+    "Overcharge, internal short, or electrolyte breakdown — physical inspection required",
+  "Idle Drain / Parasitic Loss":
+    "BMS wake current, wiring leakage, or parasitic load from accessories",
+  "BMS Communication Failure":
+    "Faulty BMS module, broken CAN/UART wire, or power supply issue to BMS",
+  "Contactor / Relay Failure":
+    "Welded contacts, coil failure, or driver circuit fault — check with multimeter",
+  "Voltage Sag Under Load":
+    "High internal resistance or degraded cells dropping voltage under current draw",
+  "Cell Reversal Detected":
+    "One or more cells deeply discharged below 0V — cell permanently damaged, pack must be rebuilt",
+  "Pack Imbalance After Full Charge":
+    "Passive balancing insufficient, active balancer needed, or one group has high self-discharge",
+  "Charger Not Recognized by BMS":
+    "BMS communication port fault, charger protocol mismatch, or damaged charge connector",
+  "Regenerative Braking Fault":
+    "Controller regen parameter misconfigured, or BMS rejecting charge current during regen",
+  "Battery Disconnects Under Acceleration":
+    "BMS overcurrent protection triggering, or high IR causing voltage sag below cutoff threshold",
+  "High Self-Discharge Rate":
+    "Internal cell micro-short, BMS parasitic drain, or wiring insulation breakdown to chassis",
+  "Sulfation / Deep Discharge Damage":
+    "Pack left discharged for extended period — cells may be unrecoverable, check individual cell voltages",
+  "Cell Short Circuit":
+    "Manufacturing defect or physical damage causing internal short — immediate isolation required",
+  "Battery Capacity Below 60%":
+    "Normal aging past end-of-life threshold, or accelerated degradation from deep cycles/heat",
 };
 
 const BMS_FLAG_LABELS = [
@@ -69,6 +138,9 @@ const BMS_FLAG_LABELS = [
   { key: "undervoltage" as const, label: "Undervoltage" },
   { key: "overcurrent" as const, label: "Overcurrent" },
   { key: "temperatureFault" as const, label: "Temp Fault" },
+  { key: "cellImbalance" as const, label: "Cell Imbalance" },
+  { key: "communicationFault" as const, label: "Comm Failure" },
+  { key: "contactorFault" as const, label: "Contactor Fault" },
 ];
 
 export default function BatteryTests() {
@@ -109,16 +181,66 @@ export default function BatteryTests() {
   const anyBmsFlag = Object.values(testResults.bmsFlags).some(Boolean);
   const bmsSt: Status = anyBmsFlag ? "fault" : "good";
 
+  // Cell Balance
+  const cellBalVals = testResults.cellBalanceVoltages
+    .map((v) => Number.parseFloat(v))
+    .filter((v) => !Number.isNaN(v) && v > 0);
+  const cellBalMin = cellBalVals.length ? Math.min(...cellBalVals) : 0;
+  const cellBalMax = cellBalVals.length ? Math.max(...cellBalVals) : 0;
+  const cellBalSpread = cellBalVals.length ? cellBalMax - cellBalMin : 0;
+  const cellBalSt: Status = cellBalVals.length
+    ? spreadStatus(cellBalSpread)
+    : "good";
+
+  // Insulation
+  const insulPosVal =
+    Number.parseFloat(testResults.insulationResistancePosGnd) || 0;
+  const insulNegVal =
+    Number.parseFloat(testResults.insulationResistanceNegGnd) || 0;
+  const insulSt: Status =
+    testResults.insulationResistancePosGnd ||
+    testResults.insulationResistanceNegGnd
+      ? insulationStatus(insulPosVal, insulNegVal)
+      : "good";
+
+  // Charging Circuit
+  const chargerVVal = Number.parseFloat(testResults.chargerOutputVoltage) || 0;
+  const chargingPortVVal =
+    Number.parseFloat(testResults.chargingPortVoltage) || 0;
+  const chargingCircuitSt: Status = chargingCircuitStatus(
+    chargerVVal,
+    chargingPortVVal,
+    testResults.chargerOutputVoltage,
+  );
+
   // Health score
   const healthScore = useMemo(() => {
-    const statuses = [packVStatus, dropSt, irSt, tempSt, bmsSt];
+    const statuses = [
+      packVStatus,
+      dropSt,
+      irSt,
+      tempSt,
+      bmsSt,
+      cellBalSt,
+      insulSt,
+      chargingCircuitSt,
+    ];
     let score = 100;
     for (const s of statuses) {
       if (s === "fault") score -= 20;
       else if (s === "warning") score -= 8;
     }
     return Math.max(0, score);
-  }, [packVStatus, dropSt, irSt, tempSt, bmsSt]);
+  }, [
+    packVStatus,
+    dropSt,
+    irSt,
+    tempSt,
+    bmsSt,
+    cellBalSt,
+    insulSt,
+    chargingCircuitSt,
+  ]);
 
   const healthColor =
     healthScore >= 70 ? "#2ED47A" : healthScore >= 40 ? "#F5C84B" : "#E25555";
@@ -141,6 +263,18 @@ export default function BatteryTests() {
       ).map((f) => f.label);
       issues.push(`BMS faults: ${flags.join(", ")}`);
     }
+    if (cellBalSt !== "good" && cellBalVals.length > 0)
+      issues.push(
+        `Cell imbalance ${cellBalSt}: spread ${cellBalSpread.toFixed(3)}V`,
+      );
+    if (insulSt !== "good" && (insulPosVal > 0 || insulNegVal > 0))
+      issues.push(
+        `Insulation resistance ${insulSt}: +${insulPosVal}MΩ / -${insulNegVal}MΩ`,
+      );
+    if (chargingCircuitSt !== "good" && testResults.chargerOutputVoltage)
+      issues.push(
+        `Charging circuit ${chargingCircuitSt}: ${chargerVVal}V output`,
+      );
     return issues;
   }, [
     packVStatus,
@@ -153,6 +287,15 @@ export default function BatteryTests() {
     avgTemp,
     anyBmsFlag,
     testResults.bmsFlags,
+    cellBalSt,
+    cellBalVals.length,
+    cellBalSpread,
+    insulSt,
+    insulPosVal,
+    insulNegVal,
+    chargingCircuitSt,
+    testResults.chargerOutputVoltage,
+    chargerVVal,
   ]);
 
   const recommendation =
@@ -195,10 +338,15 @@ export default function BatteryTests() {
         {/* Voltage Test */}
         {tests.includes("voltage") && (
           <TestCard title="Voltage Test" tool="Multimeter" status={packVStatus}>
-            <p className="text-xs mb-4" style={{ color: "#A8B0BA" }}>
-              Measure pack voltage with multimeter across main terminals. Check
-              individual cell voltages for balance.
-            </p>
+            <StepList
+              steps={[
+                "Set multimeter to DC Voltage (600V range for HV packs, 200V for 48V systems).",
+                "Connect RED probe to B+ terminal, BLACK to B- terminal of battery pack.",
+                "Record pack voltage at rest — no load, 5 min after charging stops.",
+                "Accept: within ±5% of nominal. Reject: >10% deviation or reverse polarity reading.",
+                "Check cell group voltages via balance connector — all groups should be within 50mV of each other.",
+              ]}
+            />
             <div className="mb-4">
               <div
                 className="text-xs font-medium block mb-1"
@@ -257,10 +405,15 @@ export default function BatteryTests() {
         {/* Voltage Drop Test */}
         {tests.includes("voltageDrop") && (
           <TestCard title="Voltage Drop Test" tool="Multimeter" status={dropSt}>
-            <p className="text-xs mb-4" style={{ color: "#A8B0BA" }}>
-              Measure voltage at idle and under load (full throttle). Excessive
-              drop indicates high resistance or weak cells.
-            </p>
+            <StepList
+              steps={[
+                "Measure idle pack voltage with motor off — record as V_idle.",
+                "Apply load: run motor at 50% throttle for 30 seconds continuously.",
+                "Measure pack voltage under load — record as V_load.",
+                "Calculate: Drop = V_idle − V_load.",
+                "Accept: drop <5% of nominal. Warning: 5–10%. Reject: >10% = high internal resistance.",
+              ]}
+            />
             <div className="grid grid-cols-2 gap-4 mb-4">
               <div>
                 <div
@@ -319,7 +472,13 @@ export default function BatteryTests() {
                         : dropSt === "warning"
                           ? "rgba(245,200,75,0.12)"
                           : "rgba(226,85,85,0.12)",
-                    border: `1px solid ${dropSt === "good" ? "#2ED47A" : dropSt === "warning" ? "#F5C84B" : "#E25555"}44`,
+                    border: `1px solid ${
+                      dropSt === "good"
+                        ? "#2ED47A"
+                        : dropSt === "warning"
+                          ? "#F5C84B"
+                          : "#E25555"
+                    }44`,
                   }}
                 >
                   {drop.toFixed(2)}V
@@ -336,10 +495,15 @@ export default function BatteryTests() {
             tool="IR Tester"
             status={irSt}
           >
-            <p className="text-xs mb-4" style={{ color: "#A8B0BA" }}>
-              High internal resistance causes voltage sag and heat. Measure at
-              50% SOC for accuracy.
-            </p>
+            <StepList
+              steps={[
+                "Use dedicated battery IR tester (e.g. Hioki BT3554 or equivalent).",
+                "Connect to pack B+ and B- with kelvin (4-wire) probes for accuracy.",
+                "Record pack IR in milliohms (mΩ) — test at 50% SOC for best accuracy.",
+                "Accept: <100mΩ. Warning: 100–300mΩ. Reject: >300mΩ — severe degradation.",
+                "Test individual cells via balance connector. All cells should be within ±10% of the average cell IR.",
+              ]}
+            />
             <div className="mb-4">
               <div
                 className="text-xs font-medium block mb-1"
@@ -396,10 +560,15 @@ export default function BatteryTests() {
         {/* Temperature Test */}
         {tests.includes("temperature") && (
           <TestCard title="Temperature Test" tool="Thermal Gun" status={tempSt}>
-            <p className="text-xs mb-4" style={{ color: "#A8B0BA" }}>
-              Scan battery surface at 6 points. Temperature spread &gt;5°C may
-              indicate failing cells.
-            </p>
+            <StepList
+              steps={[
+                "Use IR thermal gun — set emissivity to 0.95 for plastic/composite battery casing.",
+                "Scan full battery surface in a grid pattern: top, sides, and bottom panels.",
+                "Record: hottest point, coolest point, and average temperature.",
+                "Accept: <45°C at rest, <60°C under load.",
+                ">65°C on any cell group = immediate stop — isolate pack and check cooling path for blockage.",
+              ]}
+            />
             <div className="grid grid-cols-3 gap-3 mb-4">
               {testResults.temps.map((v, i) => (
                 // biome-ignore lint/suspicious/noArrayIndexKey: fixed-length array
@@ -460,10 +629,15 @@ export default function BatteryTests() {
         {/* BMS Diagnostics */}
         {tests.includes("bms") && (
           <TestCard title="BMS Diagnostics" tool="BMS Tool" status={bmsSt}>
-            <p className="text-xs mb-4" style={{ color: "#A8B0BA" }}>
-              Connect BMS diagnostic tool to read fault codes and check
-              protection triggers.
-            </p>
+            <StepList
+              steps={[
+                "Connect BMS diagnostic tool or Bluetooth OBD reader to the BMS communication port.",
+                "Read all active fault codes and record each one before clearing.",
+                "Check cell group voltages from BMS readout — flag any group with >50mV spread.",
+                "Verify overcurrent protection threshold matches spec sheet value.",
+                "Clear codes, apply 5-minute test load, then verify no codes return.",
+              ]}
+            />
             <div className="mb-4">
               <div
                 className="text-xs font-medium block mb-1"
@@ -520,6 +694,347 @@ export default function BatteryTests() {
                 })}
               </div>
             </div>
+          </TestCard>
+        )}
+
+        {/* Cell Balance Test */}
+        {tests.includes("cellBalance") && (
+          <TestCard
+            title="Cell Balance Test"
+            tool="Multimeter"
+            status={cellBalSt}
+          >
+            <StepList
+              steps={[
+                "Fully charge pack to 100% SOC before testing — ensure charger CC-CV transition is complete.",
+                "Connect balance tester or BMS reader to the balance connector harness.",
+                "Read all cell group voltages simultaneously and enter below.",
+                "Calculate: Spread = Max cell V − Min cell V.",
+                "Accept: <50mV spread. Warning: 50–150mV. Reject: >150mV — active balancing required.",
+                "Flag: any cell >3.65V (overcharged risk) or <3.0V (deep discharge damage).",
+              ]}
+            />
+            <div>
+              <div
+                className="text-xs font-medium block mb-2"
+                style={{ color: "#A8B0BA" }}
+              >
+                Cell Voltages — 16 Cells (V)
+              </div>
+              <div className="grid grid-cols-4 gap-1.5 mb-4">
+                {testResults.cellBalanceVoltages.map((v, i) => {
+                  const val = Number.parseFloat(v);
+                  const isMin =
+                    cellBalVals.length > 1 && val === cellBalMin && v !== "";
+                  const isMax =
+                    cellBalVals.length > 1 && val === cellBalMax && v !== "";
+                  return (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: fixed-length array
+                    <div key={`cb-${i}`} className="space-y-0.5">
+                      <div
+                        className="text-xs text-center font-medium"
+                        style={{
+                          color: isMin
+                            ? "#E25555"
+                            : isMax
+                              ? "#F5C84B"
+                              : "#4B5563",
+                        }}
+                      >
+                        C{i + 1}
+                        {isMin ? " ▼" : isMax ? " ▲" : ""}
+                      </div>
+                      <input
+                        type="number"
+                        className="cell-input"
+                        placeholder="3.7"
+                        value={v}
+                        onChange={(e) => {
+                          const next = [...testResults.cellBalanceVoltages];
+                          next[i] = e.target.value;
+                          updateTestResult("cellBalanceVoltages", next);
+                        }}
+                        style={{
+                          borderColor: isMin
+                            ? "#E25555"
+                            : isMax
+                              ? "#F5C84B"
+                              : undefined,
+                        }}
+                        data-ocid={`cellbalance.cell.${i + 1}.input`}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+              {cellBalVals.length >= 2 && (
+                <div
+                  className="rounded-lg p-3 flex items-center gap-6"
+                  style={{ background: "#0E1116", border: "1px solid #2B3540" }}
+                >
+                  <div className="text-center">
+                    <div className="text-xs" style={{ color: "#E25555" }}>
+                      MIN
+                    </div>
+                    <div
+                      className="text-sm font-bold"
+                      style={{ color: "#E25555" }}
+                    >
+                      {cellBalMin.toFixed(3)}V
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-xs" style={{ color: "#F5C84B" }}>
+                      MAX
+                    </div>
+                    <div
+                      className="text-sm font-bold"
+                      style={{ color: "#F5C84B" }}
+                    >
+                      {cellBalMax.toFixed(3)}V
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-xs" style={{ color: "#A8B0BA" }}>
+                      SPREAD
+                    </div>
+                    <div
+                      className="text-sm font-bold"
+                      style={{
+                        color:
+                          cellBalSt === "good"
+                            ? "#2ED47A"
+                            : cellBalSt === "warning"
+                              ? "#F5C84B"
+                              : "#E25555",
+                      }}
+                    >
+                      {cellBalSpread.toFixed(3)}V
+                    </div>
+                  </div>
+                  <div className="text-xs" style={{ color: "#A8B0BA" }}>
+                    {cellBalSt === "good" && "✓ Balanced"}
+                    {cellBalSt === "warning" && "⚠ Slight imbalance"}
+                    {cellBalSt === "fault" && "✕ Imbalance detected"}
+                  </div>
+                </div>
+              )}
+            </div>
+          </TestCard>
+        )}
+
+        {/* Insulation Resistance Test */}
+        {tests.includes("insulation") && (
+          <TestCard
+            title="Insulation Resistance Test"
+            tool="Megger / Insulation Tester"
+            status={insulSt}
+          >
+            <StepList
+              steps={[
+                "Disconnect battery pack from vehicle completely — isolate both B+ and B- poles.",
+                "Set Megger insulation tester to 500V DC test voltage.",
+                "Connect positive probe to B+ terminal, negative probe to chassis/frame ground.",
+                "Hold test for 60 seconds — record the final stable reading.",
+                "Repeat: B- terminal to chassis/frame ground.",
+                "Accept: >10MΩ. Warning: 1–10MΩ. Reject: <1MΩ = insulation breakdown — do NOT use.",
+              ]}
+            />
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div>
+                <div
+                  className="text-xs font-medium block mb-1"
+                  style={{ color: "#A8B0BA" }}
+                >
+                  Positive to GND (MΩ)
+                </div>
+                <input
+                  type="number"
+                  className="diag-input"
+                  placeholder="e.g. 2.5"
+                  value={testResults.insulationResistancePosGnd}
+                  onChange={(e) =>
+                    updateTestResult(
+                      "insulationResistancePosGnd",
+                      e.target.value,
+                    )
+                  }
+                  data-ocid="insulation.pos_gnd.input"
+                />
+              </div>
+              <div>
+                <div
+                  className="text-xs font-medium block mb-1"
+                  style={{ color: "#A8B0BA" }}
+                >
+                  Negative to GND (MΩ)
+                </div>
+                <input
+                  type="number"
+                  className="diag-input"
+                  placeholder="e.g. 2.5"
+                  value={testResults.insulationResistanceNegGnd}
+                  onChange={(e) =>
+                    updateTestResult(
+                      "insulationResistanceNegGnd",
+                      e.target.value,
+                    )
+                  }
+                  data-ocid="insulation.neg_gnd.input"
+                />
+              </div>
+            </div>
+            {(insulPosVal > 0 || insulNegVal > 0) && (
+              <div
+                className="rounded-lg p-3 space-y-1"
+                style={{ background: "#0E1116", border: "1px solid #2B3540" }}
+              >
+                <InsulationRow label="+ Terminal" value={insulPosVal} />
+                <InsulationRow label="− Terminal" value={insulNegVal} />
+                <div
+                  className="text-xs pt-1"
+                  style={{
+                    color:
+                      insulSt === "good"
+                        ? "#2ED47A"
+                        : insulSt === "warning"
+                          ? "#F5C84B"
+                          : "#E25555",
+                    borderTop: "1px solid #2B3540",
+                    paddingTop: 6,
+                    marginTop: 4,
+                  }}
+                >
+                  {insulSt === "good" && "✓ Insulation integrity good"}
+                  {insulSt === "warning" && "⚠ Marginal insulation — monitor"}
+                  {insulSt === "fault" &&
+                    "✕ Insulation breakdown — immediate action required"}
+                </div>
+              </div>
+            )}
+          </TestCard>
+        )}
+
+        {/* Charging Circuit Test */}
+        {tests.includes("chargingCircuit") && (
+          <TestCard
+            title="Charging Circuit Test"
+            tool="Multimeter"
+            status={chargingCircuitSt}
+          >
+            <StepList
+              steps={[
+                "Connect charger to vehicle charging port — do not start charging yet.",
+                "Measure charger output voltage at charging port pins (not at charger brick output).",
+                "Measure charging current with a clamp meter around the main charge wire.",
+                "Wiring drop = Charger output V − Charging port V.",
+                "Accept: drop <1V. Reject: >2V drop = bad wiring, corroded connector, or undersized cable.",
+                "Verify current tapers down as pack approaches 100% SOC (CC→CV phase transition).",
+              ]}
+            />
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+              <div>
+                <div
+                  className="text-xs font-medium block mb-1"
+                  style={{ color: "#A8B0BA" }}
+                >
+                  Charger Output Voltage (V)
+                </div>
+                <input
+                  type="number"
+                  className="diag-input"
+                  placeholder="e.g. 58.0"
+                  value={testResults.chargerOutputVoltage}
+                  onChange={(e) =>
+                    updateTestResult("chargerOutputVoltage", e.target.value)
+                  }
+                  data-ocid="charging.charger_output_voltage.input"
+                />
+              </div>
+              <div>
+                <div
+                  className="text-xs font-medium block mb-1"
+                  style={{ color: "#A8B0BA" }}
+                >
+                  Charger Output Current (A)
+                </div>
+                <input
+                  type="number"
+                  className="diag-input"
+                  placeholder="e.g. 10.0"
+                  value={testResults.chargerOutputCurrent}
+                  onChange={(e) =>
+                    updateTestResult("chargerOutputCurrent", e.target.value)
+                  }
+                  data-ocid="charging.charger_output_current.input"
+                />
+              </div>
+              <div>
+                <div
+                  className="text-xs font-medium block mb-1"
+                  style={{ color: "#A8B0BA" }}
+                >
+                  Charging Port Voltage (V)
+                </div>
+                <input
+                  type="number"
+                  className="diag-input"
+                  placeholder="e.g. 57.5"
+                  value={testResults.chargingPortVoltage}
+                  onChange={(e) =>
+                    updateTestResult("chargingPortVoltage", e.target.value)
+                  }
+                  data-ocid="charging.port_voltage.input"
+                />
+              </div>
+            </div>
+            {testResults.chargerOutputVoltage && (
+              <div
+                className="rounded-lg p-3 space-y-2"
+                style={{ background: "#0E1116", border: "1px solid #2B3540" }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs" style={{ color: "#A8B0BA" }}>
+                    Charger Output
+                  </span>
+                  <span
+                    className="text-xs font-bold"
+                    style={{
+                      color:
+                        chargerVVal >= 54 && chargerVVal <= 58.8
+                          ? "#2ED47A"
+                          : "#F5C84B",
+                    }}
+                  >
+                    {chargerVVal}V
+                    {chargerVVal >= 54 && chargerVVal <= 58.8
+                      ? " ✓ In range"
+                      : " ⚠ Out of range"}
+                  </span>
+                </div>
+                {chargingPortVVal > 0 && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs" style={{ color: "#A8B0BA" }}>
+                      Voltage drop (charger→port)
+                    </span>
+                    <span
+                      className="text-xs font-bold"
+                      style={{
+                        color:
+                          chargerVVal - chargingPortVVal > 3
+                            ? "#E25555"
+                            : "#2ED47A",
+                      }}
+                    >
+                      {(chargerVVal - chargingPortVVal).toFixed(2)}V
+                      {chargerVVal - chargingPortVVal > 3
+                        ? " ✕ Wiring fault"
+                        : " ✓ OK"}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </TestCard>
         )}
       </div>
@@ -625,6 +1140,53 @@ export default function BatteryTests() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function StepList({ steps }: { steps: string[] }) {
+  return (
+    <ol className="space-y-1.5 mb-4">
+      {steps.map((s, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: fixed list
+        <li key={i} className="flex gap-2 text-xs" style={{ color: "#A8B0BA" }}>
+          <span
+            className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold"
+            style={{ background: "#0E1116", color: "#4A9EFF", minWidth: 20 }}
+          >
+            {i + 1}
+          </span>
+          <span style={{ lineHeight: 1.5 }}>{s}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function InsulationRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: number;
+}) {
+  const status: Status = value < 0.5 ? "fault" : value < 1 ? "warning" : "good";
+  const color =
+    status === "good"
+      ? "#2ED47A"
+      : status === "warning"
+        ? "#F5C84B"
+        : "#E25555";
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-xs" style={{ color: "#A8B0BA" }}>
+        {label}
+      </span>
+      <span className="text-xs font-bold" style={{ color }}>
+        {value > 0 ? `${value} MΩ` : "—"}
+        {value > 0 &&
+          (status === "good" ? " ✓" : status === "warning" ? " ⚠" : " ✕")}
+      </span>
     </div>
   );
 }
